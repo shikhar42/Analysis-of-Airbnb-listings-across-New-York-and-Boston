@@ -64,6 +64,37 @@ tt_ma <- t.test(masample, alternative = 'two.sided', mu=338) #Testing claim mean
 tt_ma
 tt_ma$conf.int #95% confidence interval for the MA mean price
 
+## Shared cleaned modelling data and held-out factor-level guard
+# Sections 2 (regression) and 3 (LASSO) use the same price-outlier rule as
+# the t-tests above: outliers::rm.outlier() on price with fill = FALSE,
+# median = FALSE, opposite = FALSE. Both models therefore use raw prices on
+# this one cleaned basis, rather than the t-tests cleaning price while the
+# models silently used every raw row.
+clean_model_prices <- rm.outlier(nymalistings$price, fill = FALSE, median = FALSE, opposite = FALSE)
+modeling_data_clean <- nymalistings[nymalistings$price %in% clean_model_prices, ]
+cat("Shared modelling data: kept", nrow(modeling_data_clean), "of", nrow(nymalistings), "rows after the shared price-outlier rule.\n")
+
+# Held-out rows can contain categorical levels that never occur in training;
+# predict.lm() and model.matrix() can then fail or produce incompatible
+# columns. Align each categorical test column to the training levels:
+# unseen levels become NA, and rows whose NA was introduced this way are
+# dropped (with the count printed).
+align_test_factor_levels <- function(train_data, test_data, categorical_columns) {
+  unseen_rows <- rep(FALSE, nrow(test_data))
+  for (column_name in categorical_columns) {
+    if (!(column_name %in% names(train_data)) || !(column_name %in% names(test_data))) next
+    train_values <- train_data[[column_name]]
+    if (!is.factor(train_values) && !is.character(train_values)) next
+    train_levels <- if (is.factor(train_values)) levels(droplevels(train_values)) else unique(as.character(train_values[!is.na(train_values)]))
+    test_values <- as.character(test_data[[column_name]])
+    unseen_rows <- unseen_rows | (!is.na(test_values) & !(test_values %in% train_levels))
+    test_data[[column_name]] <- factor(test_values, levels = train_levels)
+  }
+  dropped_rows <- sum(unseen_rows)
+  cat("Dropped", dropped_rows, "held-out rows with categorical levels not present in the training data.\n")
+  test_data[!unseen_rows, , drop = FALSE]
+}
+
 ###2 Multile Linear Regression
 
 summary(nymalistings) #summary of the dataset represents the min, max, and quartile values
@@ -80,7 +111,8 @@ which(sapply(m, function(x) length(unique(x))<2)) #command to calculate the numb
 
 # NOTE: id and host_id are identifiers, not price drivers, so they are NOT
 # used as predictors in the regression (or in the LASSO matrix in section 3).
-linearMod <- lm(price ~ street + neighbourhood_cleansed + city + state + zipcode + latitude + longitude + property_type + room_type + accommodates + bathrooms + beds + bed_type + review_scores_rating, data=nymalistings) #function to implement linear regression for price(dependent variable) over other independent variables
+# The regression and LASSO now use the same predictor set, including bedrooms.
+linearMod <- lm(price ~ street + neighbourhood_cleansed + city + state + zipcode + latitude + longitude + property_type + room_type + accommodates + bathrooms + bedrooms + beds + bed_type + review_scores_rating, data=modeling_data_clean) #function to implement linear regression for price(dependent variable) over other independent variables
 
 summary(linearMod) #summary of the linear model
 
@@ -93,19 +125,23 @@ residual_price <- data.frame(resid(linearMod)) #resid() function to calculate th
 format(residual_price, scientific=FALSE)
 
 ## Held-out evaluation of the regression (RMSE / MAE)
-# The model above is fit on all rows, so its in-sample fit overstates how well
-# it predicts new listings. Refit on a random training split and report RMSE
-# and MAE on the held-out test rows. Price is right-skewed, so a log-price
+# The model above is fit on all cleaned rows, so its in-sample fit overstates
+# how well it predicts new listings. Refit on a random training split and
+# report RMSE and MAE on the held-out test rows. The headline RMSE/MAE below
+# are dollar errors on the shared cleaned raw-price basis
+# (modeling_data_clean); the log-price comparison uses the same cleaned split
+# and is back-transformed to dollars. Price is right-skewed, so the log-price
 # model is also fit and compared on the price scale (via exp(prediction);
 # note this back-transformation is approximate and tends to under-predict).
 set.seed(123) #Seed before the regression train/test split
-reg_columns <- c("price", "street", "neighbourhood_cleansed", "city", "state", "zipcode", "latitude", "longitude", "property_type", "room_type", "accommodates", "bathrooms", "beds", "bed_type", "review_scores_rating")
-reg_data <- na.omit(nymalistings[, reg_columns])
+reg_columns <- c("price", "street", "neighbourhood_cleansed", "city", "state", "zipcode", "latitude", "longitude", "property_type", "room_type", "accommodates", "bathrooms", "bedrooms", "beds", "bed_type", "review_scores_rating")
+reg_data <- na.omit(modeling_data_clean[, reg_columns])
 reg_train_idx <- sample(seq_len(nrow(reg_data)), size = floor(0.7 * nrow(reg_data)))
 reg_train <- reg_data[reg_train_idx, ]
 reg_test <- reg_data[-reg_train_idx, ]
+reg_test <- align_test_factor_levels(reg_train, reg_test, setdiff(reg_columns, "price"))
 
-reg_formula <- price ~ street + neighbourhood_cleansed + city + state + zipcode + latitude + longitude + property_type + room_type + accommodates + bathrooms + beds + bed_type + review_scores_rating
+reg_formula <- price ~ street + neighbourhood_cleansed + city + state + zipcode + latitude + longitude + property_type + room_type + accommodates + bathrooms + bedrooms + beds + bed_type + review_scores_rating
 linearMod_train <- lm(reg_formula, data = reg_train)
 pred_test <- predict(linearMod_train, newdata = reg_test)
 rmse_test <- sqrt(mean((reg_test$price - pred_test)^2)) #held-out RMSE, in dollars
@@ -116,7 +152,7 @@ mae_test
 # Log-price version (price > 0 only, as log(0) is undefined)
 reg_train_pos <- reg_train[reg_train$price > 0, ]
 reg_test_pos <- reg_test[reg_test$price > 0, ]
-logMod_train <- lm(log(price) ~ street + neighbourhood_cleansed + city + state + zipcode + latitude + longitude + property_type + room_type + accommodates + bathrooms + beds + bed_type + review_scores_rating, data = reg_train_pos)
+logMod_train <- lm(log(price) ~ street + neighbourhood_cleansed + city + state + zipcode + latitude + longitude + property_type + room_type + accommodates + bathrooms + bedrooms + beds + bed_type + review_scores_rating, data = reg_train_pos)
 pred_log_test <- exp(predict(logMod_train, newdata = reg_test_pos)) #back-transformed to dollars
 rmse_log_test <- sqrt(mean((reg_test_pos$price - pred_log_test)^2)) #held-out RMSE for the log-price model, in dollars
 mae_log_test <- mean(abs(reg_test_pos$price - pred_log_test)) #held-out MAE for the log-price model, in dollars
@@ -126,9 +162,11 @@ mae_log_test
 ### 3. Lasso Regularization
 
 # Predictor columns are selected by name. id and host_id are excluded (see
-# the note in section 2), and price is the response.
+# the note in section 2), and price is the response. This is the same
+# predictor set as the regression, including bedrooms, and DF starts from the
+# same shared cleaned modelling data (modeling_data_clean).
 lasso_predictors <- c("street", "neighbourhood_cleansed", "city", "state", "zipcode", "latitude", "longitude", "property_type", "room_type", "accommodates", "bathrooms", "bedrooms", "beds", "bed_type", "review_scores_rating")
-DF <- nymalistings[, c(lasso_predictors, "price")] #Created a dataframe
+DF <- modeling_data_clean[, c(lasso_predictors, "price")] #Created a dataframe
 
 DF <- na.omit(DF) #omitted the null/missing values from the dataframe
 
@@ -137,8 +175,12 @@ y <- DF$price #price variable for lasso model
 # Proper dummy (one-hot) coding for the categorical columns: model.matrix
 # expands each factor/character column into 0/1 indicator columns and leaves
 # numeric columns as they are. (The previous lapply(x, as.numeric) silently
-# replaced categories with arbitrary integer level codes.)
+# replaced categories with arbitrary integer level codes.) LASSO has no
+# separate held-out design matrix in this script: this one shared Mx, built
+# once from DF, is used for every cv.glmnet fold, so its columns cannot
+# diverge between training and validation rows.
 Mx <- model.matrix(price ~ ., data = DF)[, -1] #creating a matrix (drop the intercept column; glmnet adds its own)
+set.seed(123) #Seed immediately before cv.glmnet, so its fold assignment is reproducible
 lasso_model <- cv.glmnet(Mx , y, alpha = 1) #Setting up the model for lasso
 
 lasso_model1 <- glmnet(Mx,y) #setting up the model
@@ -172,6 +214,7 @@ set.seed(123) #Seed before the train/test split
 train_idx_ma <- sample(seq_len(nrow(data_ma)), size = floor(0.7 * nrow(data_ma)))
 train_data <- data_ma[train_idx_ma, c("room_type", "price")]           #training data for MA
 test_data <- data_ma[-train_idx_ma, c("room_type", "price")]       #testing data  for MA
+test_data <- align_test_factor_levels(train_data, test_data, "room_type")
 
 m1 <- lda(room_type ~ price, data = train_data) #lda model for MA dataset
 plot(m1)  #lda plot for MA dataset
@@ -194,6 +237,7 @@ set.seed(123) #Seed before the NY train/test split
 train_idx_ny <- sample(seq_len(nrow(data_ny)), size = floor(0.7 * nrow(data_ny)))
 train_data_ny <- data_ny[train_idx_ny, c("room_type", "price")]          #training data for NY
 test_data_ny <- data_ny[-train_idx_ny, c("room_type", "price")]      #testing data for NY
+test_data_ny <- align_test_factor_levels(train_data_ny, test_data_ny, "room_type")
 
 m1_ny <- lda(room_type ~ price, data = train_data_ny) #fitting model creation
 plot(m1_ny) #plot of fit model
@@ -211,12 +255,14 @@ majority_baseline_ny
 
 ###4.1.2 K nearest Neighbor Classification
 ##KNN for MA dataset
-# Reuses the seeded random split from section 4.1.1 (train_idx_ma).
+# Reuses the seeded random split from section 4.1.1 (train_idx_ma), including
+# the factor-aligned held-out rows in test_data, so KNN is evaluated on
+# exactly the same test rows as LDA.
 
 train_data_knn <- data_ma[train_idx_ma, "price", drop = FALSE] #training data for quantitative variables
-test_data_knn <- data_ma[-train_idx_ma, "price", drop = FALSE] # testing data for quantitative variables
+test_data_knn <- test_data[, "price", drop = FALSE] #testing data for quantitative variables
 train_data_ql <- data_ma[train_idx_ma, "room_type"] #training data for qualitative variable
-test_data_ql <- data_ma[-train_idx_ma, "room_type"] #testing data for qualitative variable
+test_data_ql <- test_data$room_type #testing data for qualitative variable
 
 # k = 1 and k = 10 are kept in separate objects, so neither result
 # overwrites the other (the previous code reused a single variable).
@@ -232,12 +278,14 @@ mean(test_data_ql == knn_model_k10) #to find the matched values by the predicted
 majority_baseline_ma #majority-class baseline for MA, from section 4.1.1 -- compare both k values against this
 
 ##KNN for NY dataset
-# Reuses the seeded random split from section 4.1.1 (train_idx_ny).
+# Reuses the seeded random split from section 4.1.1 (train_idx_ny), including
+# the factor-aligned held-out rows in test_data_ny, so KNN is evaluated on
+# exactly the same test rows as LDA.
 
 train_data_knn_ny <- data_ny[train_idx_ny, "price", drop = FALSE] #training data for quantitative variables
-test_data_knn_ny <- data_ny[-train_idx_ny, "price", drop = FALSE] #training data for quantitative variables
+test_data_knn_ny <- test_data_ny[, "price", drop = FALSE] #training data for quantitative variables
 train_data_ql_ny <- data_ny[train_idx_ny, "room_type"]  #training data for qualitative variables
-test_data_ql_ny <- data_ny[-train_idx_ny, "room_type"] #training data for qualitative variables
+test_data_ql_ny <- test_data_ny$room_type #training data for qualitative variables
 
 knn_model_ny_k1 <- knn(data.frame(train_data_knn_ny), data.frame(test_data_knn_ny), train_data_ql_ny , k = 1) #creating a knn model with k = 1
 knn_model_ny_k10 <- knn(data.frame(train_data_knn_ny), data.frame(test_data_knn_ny), train_data_ql_ny , k = 10) #creating a knn model with k = 10

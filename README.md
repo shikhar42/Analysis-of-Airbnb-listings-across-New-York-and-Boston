@@ -41,7 +41,11 @@ All analysis is in `Airbnb_project_code.r`:
    and capacity attributes (`id` and `host_id` are identifiers and are
    excluded). Held-out RMSE and MAE are reported from a seeded random
    70/30 train/test split, for both a price model and a log-price model.
-3. **LASSO regularisation** — `glmnet` / `cv.glmnet` on a design matrix with
+   Regression and LASSO use the same predictor set (including `bedrooms`)
+   and the shared cleaned modelling data produced by the same
+   `rm.outlier` price rule as the t-tests; the headline held-out RMSE/MAE
+   are dollar errors on that cleaned raw-price basis.
+3. **LASSO regularisation** — seeded `glmnet` / `cv.glmnet` on a design matrix with
    proper dummy (one-hot) coding of the categorical columns (again
    excluding `id` and `host_id`), at `lambda.min` and `lambda.1se`.
 4. **Classification** — LDA and k-nearest neighbours (k = 1 and k = 10,
